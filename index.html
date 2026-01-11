@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>P2P Pong</title>
+    
+    <link rel="manifest" href='data:application/json;charset=utf-8,%7B%22name%22%3A%22P2P%20Pong%22%2C%22short_name%22%3A%22Pong%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23000000%22%2C%22theme_color%22%3A%22%23000000%22%2C%22icons%22%3A%5B%5D%7D'>
+    
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#000000">
+
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            touch-action: none; /* Prevent pull-to-refresh */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+
+        #ui-layer {
+            position: absolute;
+            z-index: 10;
+            text-align: center;
+            background: rgba(0,0,0,0.85);
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid #333;
+        }
+
+        h1 { margin-top: 0; font-size: 24px; text-transform: uppercase; letter-spacing: 4px;}
+        p { color: #aaa; font-size: 14px; }
+
+        input {
+            padding: 10px;
+            border-radius: 5px;
+            border: none;
+            width: 150px;
+            text-align: center;
+            font-size: 16px;
+            text-transform: uppercase;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+            border: none;
+            border-radius: 5px;
+            background: #fff;
+            color: #000;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:active { background: #ccc; }
+
+        canvas {
+            background: #000;
+            display: block;
+            touch-action: none;
+        }
+
+        .status { margin-top: 10px; color: #0f0; font-size: 12px; }
+        .hidden { display: none !important; }
+        
+        #game-info {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            padding: 0 20px;
+            box-sizing: border-box;
+            pointer-events: none;
+            z-index: 5;
+            font-size: 20px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-info" class="hidden">
+        <span id="score-left">0</span>
+        <span id="score-right">0</span>
+    </div>
+
+    <div id="ui-layer">
+        <h1>P2P Pong</h1>
+        
+        <div id="menu-main">
+            <p>Host a game to get a Code, or enter a Code to join.</p>
+            <button onclick="hostGame()">Host Game</button>
+            <div style="margin: 10px 0;">- OR -</div>
+            <input type="text" id="join-input" placeholder="ENTER CODE" maxlength="6">
+            <button onclick="joinGame()">Join Game</button>
+            <div id="status-msg" class="status"></div>
+        </div>
+
+        <div id="menu-waiting" class="hidden">
+            <p>Share this code with your friend:</p>
+            <h2 id="host-id-display" style="font-size: 32px; color: #0ff; letter-spacing: 5px; background:#222; padding:10px;">...</h2>
+            <p>Waiting for connection...</p>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    // --- CONFIGURATION ---
+    const CANVAS_WIDTH = 800; // Internal resolution
+    const CANVAS_HEIGHT = 450;
+    const PADDLE_HEIGHT = 80;
+    const PADDLE_WIDTH = 15;
+    const BALL_SIZE = 10;
+    
+    // --- STATE ---
+    let peer = null;
+    let conn = null;
+    let isHost = false;
+    let gameLoopId;
+    
+    const state = {
+        p1Y: CANVAS_HEIGHT/2 - PADDLE_HEIGHT/2,
+        p2Y: CANVAS_HEIGHT/2 - PADDLE_HEIGHT/2,
+        ball: { x: CANVAS_WIDTH/2, y: CANVAS_HEIGHT/2, dx: 4, dy: 4 },
+        score: { p1: 0, p2: 0 }
+    };
+
+    // --- DOM ELEMENTS ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const uiLayer = document.getElementById('ui-layer');
+    const menuMain = document.getElementById('menu-main');
+    const menuWaiting = document.getElementById('menu-waiting');
+    const statusMsg = document.getElementById('status-msg');
+    const hostIdDisplay = document.getElementById('host-id-display');
+    const gameInfo = document.getElementById('game-info');
+    const scoreLeft = document.getElementById('score-left');
+    const scoreRight = document.getElementById('score-right');
+
+    // --- RESIZING ---
+    function resize() {
+        // Fit canvas to screen while maintaining aspect ratio
+        const scale = Math.min(window.innerWidth / CANVAS_WIDTH, window.innerHeight / CANVAS_HEIGHT);
+        canvas.style.width = (CANVAS_WIDTH * scale) + 'px';
+        canvas.style.height = (CANVAS_HEIGHT * scale) + 'px';
+    }
+    canvas.width = CANVAS_WIDTH;
+    canvas.height = CANVAS_HEIGHT;
+    window.addEventListener('resize', resize);
+    resize();
+
+    // --- NETWORKING (PeerJS) ---
+    function initPeer() {
+        // Create a random short ID for easier typing
+        const randomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+        peer = new Peer(randomId);
+
+        peer.on('open', (id) => {
+            console.log('My Peer ID is: ' + id);
+        });
+
+        peer.on('error', (err) => {
+            statusMsg.innerText = "Error: " + err.type;
+        });
+
+        // If we are the host, listen for incoming connections
+        peer.on('connection', (c) => {
+            if(isHost) {
+                conn = c;
+                setupConnection();
+            }
+        });
+    }
+
+    function hostGame() {
+        isHost = true;
+        initPeer();
+        peer.on('open', (id) => {
+            menuMain.classList.add('hidden');
+            menuWaiting.classList.remove('hidden');
+            hostIdDisplay.innerText = id;
+        });
+    }
+
+    function joinGame() {
+        isHost = false;
+        const hostId = document.getElementById('join-input').value.trim().toUpperCase();
+        if(!hostId) return alert("Please enter a code");
+        
+        statusMsg.innerText = "Connecting...";
+        initPeer();
+        
+        // Wait briefly for our peer to init, then connect
+        peer.on('open', () => {
+            conn = peer.connect(hostId);
+            setupConnection();
+        });
+    }
+
+    function setupConnection() {
+        conn.on('open', () => {
+            console.log("Connected!");
+            uiLayer.classList.add('hidden');
+            gameInfo.classList.remove('hidden');
+            startGame();
+        });
+
+        conn.on('data', (data) => {
+            handleData(data);
+        });
+        
+        conn.on('close', () => {
+            alert("Connection lost");
+            location.reload();
+        });
+    }
+
+    // --- DATA HANDLING ---
+    function handleData(data) {
+        if (isHost) {
+            // Host receives P2 paddle position
+            if (data.type === 'move') {
+                state.p2Y = data.y;
+            }
+        } else {
+            // Client receives full game state
+            if (data.type === 'state') {
+                state.ball = data.ball;
+                state.p1Y = data.p1;
+                state.p2Y = data.p2; // Sync p2 (self) to correct drift
+                state.score = data.score;
+            }
+        }
+    }
+
+    // --- GAME LOGIC ---
+    function update() {
+        if (!isHost) return; // Only host calculates physics
+
+        // Ball movement
+        state.ball.x += state.ball.dx;
+        state.ball.y += state.ball.dy;
+
+        // Bounce Top/Bottom
+        if (state.ball.y <= 0 || state.ball.y + BALL_SIZE >= CANVAS_HEIGHT) {
+            state.ball.dy *= -1;
+        }
+
+        // Paddles
+        // P1 (Left)
+        if (state.ball.x <= PADDLE_WIDTH) {
+            if (state.ball.y + BALL_SIZE >= state.p1Y && state.ball.y <= state.p1Y + PADDLE_HEIGHT) {
+                state.ball.dx *= -1;
+                // Speed up slightly
+                state.ball.dx *= 1.05; 
+            } else if (state.ball.x < 0) {
+                state.score.p2++;
+                resetBall();
+            }
+        }
+
+        // P2 (Right)
+        if (state.ball.x + BALL_SIZE >= CANVAS_WIDTH - PADDLE_WIDTH) {
+            if (state.ball.y + BALL_SIZE >= state.p2Y && state.ball.y <= state.p2Y + PADDLE_HEIGHT) {
+                state.ball.dx *= -1;
+                state.ball.dx *= 1.05;
+            } else if (state.ball.x > CANVAS_WIDTH) {
+                state.score.p1++;
+                resetBall();
+            }
+        }
+
+        // Send state to client
+        if (conn && conn.open) {
+            conn.send({
+                type: 'state',
+                ball: state.ball,
+                p1: state.p1Y,
+                p2: state.p2Y,
+                score: state.score
+            });
+        }
+    }
+
+    function resetBall() {
+        state.ball.x = CANVAS_WIDTH / 2;
+        state.ball.y = CANVAS_HEIGHT / 2;
+        state.ball.dx = 4 * (Math.random() > 0.5 ? 1 : -1);
+        state.ball.dy = 4 * (Math.random() > 0.5 ? 1 : -1);
+    }
+
+    function draw() {
+        // Clear
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        // Center Line
+        ctx.strokeStyle = "#333";
+        ctx.setLineDash([10, 15]);
+        ctx.beginPath();
+        ctx.moveTo(CANVAS_WIDTH/2, 0);
+        ctx.lineTo(CANVAS_WIDTH/2, CANVAS_HEIGHT);
+        ctx.stroke();
+
+        // Paddles
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, state.p1Y, PADDLE_WIDTH, PADDLE_HEIGHT);
+        ctx.fillRect(CANVAS_WIDTH - PADDLE_WIDTH, state.p2Y, PADDLE_WIDTH, PADDLE_HEIGHT);
+
+        // Ball
+        ctx.fillRect(state.ball.x, state.ball.y, BALL_SIZE, BALL_SIZE);
+
+        // Score UI Update
+        scoreLeft.innerText = state.score.p1;
+        scoreRight.innerText = state.score.p2;
+    }
+
+    function gameLoop() {
+        update();
+        draw();
+        gameLoopId = requestAnimationFrame(gameLoop);
+    }
+
+    function startGame() {
+        gameLoop();
+    }
+
+    // --- CONTROLS ---
+    // Touch handling
+    canvas.addEventListener('touchmove', (e) => {
+        e.preventDefault(); // Prevent scrolling
+        const touch = e.touches[0];
+        const rect = canvas.getBoundingClientRect();
+        const scaleY = CANVAS_HEIGHT / rect.height;
+        const touchY = (touch.clientY - rect.top) * scaleY;
+
+        // Center paddle on finger
+        const newY = touchY - PADDLE_HEIGHT / 2;
+
+        // Boundary checks
+        const clampedY = Math.max(0, Math.min(CANVAS_HEIGHT - PADDLE_HEIGHT, newY));
+
+        if (isHost) {
+            state.p1Y = clampedY;
+        } else {
+            state.p2Y = clampedY; // Update local immediately for smoothness
+            // Send move to host
+            if(conn && conn.open) {
+                conn.send({ type: 'move', y: clampedY });
+            }
+        }
+    }, { passive: false });
+
+</script>
+</body>
+</html>
