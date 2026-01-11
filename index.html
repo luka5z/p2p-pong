@@ -138,6 +138,8 @@
         score: { p1: 0, p2: 0 }
     };
 
+    const keys = {};
+
     // --- DOM ELEMENTS ---
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
@@ -328,7 +330,38 @@
         scoreRight.innerText = state.score.p2;
     }
 
+    function updateInput() {
+        const paddleSpeed = 5;
+        let moved = false;
+        if (keys['ArrowUp'] || keys['w'] || keys['W']) {
+            if (isHost) {
+                state.p1Y -= paddleSpeed;
+            } else {
+                state.p2Y -= paddleSpeed;
+            }
+            moved = true;
+        }
+        if (keys['ArrowDown'] || keys['s'] || keys['S']) {
+            if (isHost) {
+                state.p1Y += paddleSpeed;
+            } else {
+                state.p2Y += paddleSpeed;
+            }
+            moved = true;
+        }
+        // Clamp
+        if (isHost) {
+            state.p1Y = Math.max(0, Math.min(CANVAS_HEIGHT - PADDLE_HEIGHT, state.p1Y));
+        } else {
+            state.p2Y = Math.max(0, Math.min(CANVAS_HEIGHT - PADDLE_HEIGHT, state.p2Y));
+            if (moved && conn && conn.open) {
+                conn.send({ type: 'move', y: state.p2Y });
+            }
+        }
+    }
+
     function gameLoop() {
+        updateInput();
         update();
         draw();
         gameLoopId = requestAnimationFrame(gameLoop);
@@ -340,6 +373,10 @@
 
     // --- CONTROLS ---
     // Touch handling
+    canvas.addEventListener('touchstart', (e) => {
+        e.preventDefault(); // Prevent any default touch actions
+    }, { passive: false });
+
     canvas.addEventListener('touchmove', (e) => {
         e.preventDefault(); // Prevent scrolling
         const touch = e.touches[0];
@@ -363,6 +400,41 @@
             }
         }
     }, { passive: false });
+
+    // Keyboard handling
+    document.addEventListener('keydown', (e) => {
+        if (['ArrowUp', 'ArrowDown', 'w', 'W', 's', 'S'].includes(e.key)) {
+            e.preventDefault();
+        }
+        keys[e.key] = true;
+    });
+
+    document.addEventListener('keyup', (e) => {
+        keys[e.key] = false;
+    });
+
+    // Mouse handling
+    canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const scaleY = CANVAS_HEIGHT / rect.height;
+        const mouseY = (e.clientY - rect.top) * scaleY;
+
+        // Center paddle on mouse
+        const newY = mouseY - PADDLE_HEIGHT / 2;
+
+        // Boundary checks
+        const clampedY = Math.max(0, Math.min(CANVAS_HEIGHT - PADDLE_HEIGHT, newY));
+
+        if (isHost) {
+            state.p1Y = clampedY;
+        } else {
+            state.p2Y = clampedY; // Update local immediately for smoothness
+            // Send move to host
+            if(conn && conn.open) {
+                conn.send({ type: 'move', y: clampedY });
+            }
+        }
+    });
 
 </script>
 </body>
